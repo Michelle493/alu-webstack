@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# 1-haproxy_ssl_setup.sh
+# Installs HAProxy, sets up SSL termination using Certbot, and configures HAProxy with web-01 and web-02 backends
+
+# ====== CONFIGURE THESE VARIABLES ======
+DOMAIN="www.holberton.online"        # Your domain with 'www'
+EMAIL="youremail@example.com"        # Your email for Let's Encrypt
+WEB1_IP="18.208.153.152"             # IP of web-01
+WEB2_IP="18.206.244.77"              # IP of web-02
+HAPROXY_PEM="/etc/ssl/certs/haproxy.pem"
+# =====================================
+
+set -e
+
+echo "[*] Updating system and installing dependencies..."
+apt update
+apt install -y haproxy certbot
+
+echo "[*] Stopping HAProxy if running..."
+systemctl stop haproxy || pkill -f haproxy || true
+
+echo "[*] Obtaining SSL certificate for $DOMAIN..."
+certbot certonly --standalone -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL"
+
+echo "[*] Building combined PEM for HAProxy..."
+mkdir -p /etc/ssl/certs
+cat /etc/letsencrypt/live/$DOMAIN/privkey.pem /etc/letsencrypt/live/$DOMAIN/fullchain.pem > "$HAPROXY_PEM"
+chmod 644 "$HAPROXY_PEM"
+chown root:root "$HAPROXY_PEM"
+
+echo "[*] Writing HAProxy configuration..."
+cat > /etc/haproxy/haproxy.cfg <<EOL
+global
+    log /dev/log local0
+    log /dev/log local1 notice
+    chroot /var/lib/haproxy
+    pidfile /var/run/haproxy.pid
+    maxconn 2000
+    user haproxy
+    group haproxy
+    daemon
+
+defaults
+    log     global
+    mode    http
+    option  httplog
+    option  dontlognull
+    timeout connect 5000ms
+    timeout client  50000ms
+    timeout server  50000ms
+
+frontend http_front
+    bind *:80
+    redirect scheme https code 301 if !{ ssl_fc }
+
+frontend https_front
+    bind *:443 ssl crt $HAPROXY_PEM
+    mode http
+    option httplog
+    default_backend web_servers
+
+backend web_servers
+    mode http
+    balance roundrobin
+    option httpchk GET /
+    server web-01 $WEB1_IP:80 check
+    server web-02 $WEB2_IP:80 check
+EOL
+
+echo "[*] Enabling and starting HAProxy..."
+systemctl enable haproxy
+systemctl restart haproxy
+
+echo "[✓] HAProxy installed and configured with SSL termination!"
+echo "[✓] Test it with: curl -sI https://$DOMAIN"
